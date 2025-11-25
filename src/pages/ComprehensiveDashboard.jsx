@@ -3,6 +3,66 @@ import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import './ComprehensiveDashboard.css';
 
+function DoctorPatientDocuments({ patientId }) {
+  const [loading, setLoading] = useState(false);
+  const [documents, setDocuments] = useState([]);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!patientId) return;
+    setLoading(true);
+    axios.get(`/api/doctor/patient/${patientId}/documents`, {
+      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+    })
+      .then(res => {
+        setDocuments(Array.isArray(res.data.documents) ? res.data.documents : []);
+        setLoading(false);
+      })
+      .catch(e => {
+        setError("Failed to load documents");
+        setLoading(false);
+      });
+  }, [patientId]);
+
+  if (!patientId) return null;
+
+  if (loading) return <div>Loading documents...</div>;
+  if (error) return <div className="error-message">{error}</div>;
+  if (!documents.length) return <div className="empty-state">No documents uploaded</div>;
+
+  return (
+    <div className="doctor-patient-documents">
+      <h4>📄 Patient Documents</h4>
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th><th>Type</th><th>Uploaded</th><th>Download</th>
+          </tr>
+        </thead>
+        <tbody>
+          {documents.map(doc => (
+            <tr key={doc.id}>
+              <td>{doc.filename}</td>
+              <td>{doc.document_type === 'prescription' ? '💊 Prescription' : doc.document_type === 'lab_report' ? '🔬 Lab Report' : doc.document_type}</td>
+              <td>{doc.upload_date ? new Date(doc.upload_date).toLocaleDateString() : '-'}</td>
+              <td>
+                <a
+                  href={`/api/patient/documents/${doc.id}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  download={doc.filename}
+                >
+                  ⬇️ Download
+                </a>
+              </td>
+            </tr>
+          )) }
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function ComprehensiveDashboard() {
     const [user, setUser] = useState(null);
     const [activeTab, setActiveTab] = useState('overview');
@@ -12,6 +72,9 @@ function ComprehensiveDashboard() {
     const [appointments, setAppointments] = useState([]);
     const [records, setRecords] = useState({});
     const [selectedPatient, setSelectedPatient] = useState(null);
+    const [aiSuggestions, setAiSuggestions] = useState(null);
+    const [loadingAI, setLoadingAI] = useState(false);
+    const [aiError, setAiError] = useState(null);
     const navigate = useNavigate();
 
     const API_URL = 'http://localhost:5000/api';
@@ -118,9 +181,39 @@ function ComprehensiveDashboard() {
             if (res.data.success) {
                 setSelectedPatient(res.data);
                 setActiveTab('patient-details');
+                setAiSuggestions(null); // Reset AI suggestions when viewing new patient
+                setAiError(null);
             }
         } catch (error) {
             console.error('Error fetching patient details:', error);
+        }
+    };
+
+    const handleGetAISuggestions = async () => {
+        if (!selectedPatient || !selectedPatient.patient) return;
+        
+        setLoadingAI(true);
+        setAiError(null);
+        try {
+            const token = localStorage.getItem('token');
+            const headers = { Authorization: `Bearer ${token}` };
+            const res = await axios.post(
+                `${API_URL}/doctor/patient/${selectedPatient.patient.id}/ai-suggestions`,
+                {},
+                { headers }
+            );
+            if (res.data.success) {
+                setAiSuggestions(res.data.suggestions);
+            } else {
+                setAiError('Failed to get AI suggestions');
+            }
+        } catch (error) {
+            console.error('Error fetching AI suggestions:', error);
+            console.error('Error response:', error.response?.data);
+            const errorMsg = error.response?.data?.error || error.response?.data?.details || error.message || 'Failed to get AI suggestions';
+            setAiError(errorMsg);
+        } finally {
+            setLoadingAI(false);
         }
     };
 
@@ -284,7 +377,7 @@ function ComprehensiveDashboard() {
                                                 <td>
                                                     <button
                                                         className="action-btn"
-                                                        onClick={() => handleViewPatientDetails(patient.patient_id)}
+                                                        onClick={() => handleViewPatientDetails(patient.id)}
                                                     >
                                                         View Details
                                                     </button>
@@ -301,7 +394,23 @@ function ComprehensiveDashboard() {
                 {activeTab === 'patient-details' && selectedPatient && (
                     <div className="tab-content">
                         <button className="back-btn" onClick={() => setActiveTab('patients')}>← Back to Patients</button>
-                        <h2>Patient: <strong>{selectedPatient.patient.first_name} {selectedPatient.patient.last_name}</strong></h2>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+                            <h2>Patient: <strong>{selectedPatient.patient.first_name} {selectedPatient.patient.last_name}</strong></h2>
+                            <button 
+                                className="action-btn" 
+                                onClick={handleGetAISuggestions}
+                                disabled={loadingAI}
+                                style={{ 
+                                    backgroundColor: '#4CAF50', 
+                                    color: 'white',
+                                    padding: '10px 20px',
+                                    fontSize: '16px',
+                                    fontWeight: 'bold'
+                                }}
+                            >
+                                {loadingAI ? '🤖 Analyzing...' : '🤖 Get AI Suggestions'}
+                            </button>
+                        </div>
                         
                         <div className="patient-details">
                             <div className="detail-section">
@@ -391,6 +500,171 @@ function ComprehensiveDashboard() {
                                     </div>
                                 )}
                             </div>
+                            <div className="detail-section">
+                                <DoctorPatientDocuments patientId={selectedPatient.patient.id} />
+                            </div>
+
+                            {/* AI Suggestions Section */}
+                            {(aiSuggestions || aiError) && (
+                                <div className="detail-section" style={{ 
+                                    marginTop: '30px', 
+                                    border: '2px solid #4CAF50', 
+                                    borderRadius: '8px',
+                                    padding: '20px',
+                                    backgroundColor: '#f9f9f9'
+                                }}>
+                                    <h3 style={{ color: '#4CAF50', marginBottom: '20px' }}>🤖 AI Medical Assistant Suggestions</h3>
+                                    
+                                    {aiError && (
+                                        <div style={{ 
+                                            padding: '15px', 
+                                            backgroundColor: '#ffebee', 
+                                            border: '1px solid #f44336',
+                                            borderRadius: '4px',
+                                            marginBottom: '20px',
+                                            color: '#c62828'
+                                        }}>
+                                            <strong>Error:</strong> {aiError}
+                                        </div>
+                                    )}
+
+                                    {aiSuggestions && !aiSuggestions.error && (
+                                        <div>
+                                            {/* Diagnosis Differentials */}
+                                            {aiSuggestions.diagnosisDifferentials && (
+                                                <div style={{ marginBottom: '25px' }}>
+                                                    <h4 style={{ color: '#2196F3', marginBottom: '15px' }}>🔬 Possible Diagnosis Differentials</h4>
+                                                    <div style={{ display: 'grid', gap: '15px' }}>
+                                                        {aiSuggestions.diagnosisDifferentials.map((diff, idx) => (
+                                                            <div key={idx} style={{
+                                                                padding: '15px',
+                                                                backgroundColor: 'white',
+                                                                border: '1px solid #e0e0e0',
+                                                                borderRadius: '6px',
+                                                                boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+                                                            }}>
+                                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                                                                    <strong style={{ fontSize: '16px', color: '#333' }}>{diff.diagnosis}</strong>
+                                                                    <span style={{
+                                                                        padding: '4px 12px',
+                                                                        borderRadius: '12px',
+                                                                        fontSize: '12px',
+                                                                        fontWeight: 'bold',
+                                                                        backgroundColor: diff.likelihood === 'High' ? '#ffcdd2' : diff.likelihood === 'Medium' ? '#fff9c4' : '#c8e6c9',
+                                                                        color: diff.likelihood === 'High' ? '#c62828' : diff.likelihood === 'Medium' ? '#f57f17' : '#2e7d32'
+                                                                    }}>
+                                                                        {diff.likelihood}
+                                                                    </span>
+                                                                </div>
+                                                                <p style={{ margin: 0, color: '#666', fontSize: '14px' }}>{diff.reasoning}</p>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Test Recommendations */}
+                                            {aiSuggestions.testRecommendations && (
+                                                <div style={{ marginBottom: '25px' }}>
+                                                    <h4 style={{ color: '#FF9800', marginBottom: '15px' }}>🧪 Test Recommendations</h4>
+                                                    <div style={{ display: 'grid', gap: '12px' }}>
+                                                        {aiSuggestions.testRecommendations.map((test, idx) => (
+                                                            <div key={idx} style={{
+                                                                padding: '12px',
+                                                                backgroundColor: 'white',
+                                                                border: '1px solid #e0e0e0',
+                                                                borderRadius: '6px',
+                                                                display: 'flex',
+                                                                justifyContent: 'space-between',
+                                                                alignItems: 'start'
+                                                            }}>
+                                                                <div style={{ flex: 1 }}>
+                                                                    <strong style={{ fontSize: '15px', color: '#333' }}>{test.test}</strong>
+                                                                    <p style={{ margin: '5px 0 0 0', color: '#666', fontSize: '14px' }}>{test.purpose}</p>
+                                                                </div>
+                                                                <span style={{
+                                                                    padding: '4px 10px',
+                                                                    borderRadius: '10px',
+                                                                    fontSize: '11px',
+                                                                    fontWeight: 'bold',
+                                                                    backgroundColor: test.priority === 'High' ? '#ffcdd2' : test.priority === 'Medium' ? '#fff9c4' : '#e1f5fe',
+                                                                    color: test.priority === 'High' ? '#c62828' : test.priority === 'Medium' ? '#f57f17' : '#0277bd',
+                                                                    marginLeft: '10px'
+                                                                }}>
+                                                                    {test.priority}
+                                                                </span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Drug Guidelines */}
+                                            {aiSuggestions.drugGuidelines && (
+                                                <div>
+                                                    <h4 style={{ color: '#9C27B0', marginBottom: '15px' }}>💊 Drug Guidelines & Safety</h4>
+                                                    <div style={{
+                                                        padding: '15px',
+                                                        backgroundColor: 'white',
+                                                        border: '1px solid #e0e0e0',
+                                                        borderRadius: '6px'
+                                                    }}>
+                                                        {aiSuggestions.drugGuidelines.interactions && aiSuggestions.drugGuidelines.interactions.length > 0 && (
+                                                            <div style={{ marginBottom: '15px' }}>
+                                                                <strong style={{ color: '#d32f2f' }}>⚠️ Drug Interactions:</strong>
+                                                                <ul style={{ margin: '8px 0', paddingLeft: '20px' }}>
+                                                                    {aiSuggestions.drugGuidelines.interactions.map((interaction, idx) => (
+                                                                        <li key={idx} style={{ marginBottom: '5px', color: '#666' }}>{interaction}</li>
+                                                                    ))}
+                                                                </ul>
+                                                            </div>
+                                                        )}
+                                                        
+                                                        {aiSuggestions.drugGuidelines.dosageReview && (
+                                                            <div style={{ marginBottom: '15px' }}>
+                                                                <strong style={{ color: '#1976d2' }}>📋 Dosage Review:</strong>
+                                                                <p style={{ margin: '8px 0 0 0', color: '#666' }}>{aiSuggestions.drugGuidelines.dosageReview}</p>
+                                                            </div>
+                                                        )}
+                                                        
+                                                        {aiSuggestions.drugGuidelines.recommendations && aiSuggestions.drugGuidelines.recommendations.length > 0 && (
+                                                            <div style={{ marginBottom: '15px' }}>
+                                                                <strong style={{ color: '#388e3c' }}>✅ Recommendations:</strong>
+                                                                <ul style={{ margin: '8px 0', paddingLeft: '20px' }}>
+                                                                    {aiSuggestions.drugGuidelines.recommendations.map((rec, idx) => (
+                                                                        <li key={idx} style={{ marginBottom: '5px', color: '#666' }}>{rec}</li>
+                                                                    ))}
+                                                                </ul>
+                                                            </div>
+                                                        )}
+                                                        
+                                                        {aiSuggestions.drugGuidelines.contraindications && aiSuggestions.drugGuidelines.contraindications.length > 0 && (
+                                                            <div>
+                                                                <strong style={{ color: '#f57c00' }}>🚫 Contraindications:</strong>
+                                                                <ul style={{ margin: '8px 0', paddingLeft: '20px' }}>
+                                                                    {aiSuggestions.drugGuidelines.contraindications.map((contra, idx) => (
+                                                                        <li key={idx} style={{ marginBottom: '5px', color: '#666' }}>{contra}</li>
+                                                                    ))}
+                                                                </ul>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* Raw response fallback */}
+                                            {aiSuggestions.rawResponse && (
+                                                <div style={{ marginTop: '20px', padding: '15px', backgroundColor: '#fff3e0', borderRadius: '6px' }}>
+                                                    <strong>AI Response:</strong>
+                                                    <pre style={{ whiteSpace: 'pre-wrap', marginTop: '10px', color: '#666' }}>
+                                                        {aiSuggestions.rawResponse}
+                                                    </pre>
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
                         </div>
                     </div>
                 )}

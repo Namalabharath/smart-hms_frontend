@@ -1,17 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import axios from 'axios';
+import api from '../../services/api';
 import './ReceptionistDashboard.css';
 
 function ReceptionistDashboard() {
   const navigate = useNavigate();
-  const abortControllerRef = useRef(null);
   const isLoadingRef = useRef(false);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [patients, setPatients] = useState([]);
   const [appointments, setAppointments] = useState([]);
   const [doctors, setDoctors] = useState([]);
-  const [staffAbsences, setStaffAbsences] = useState([]);
   const [staff, setStaff] = useState([]);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState({ type: '', text: '' });
@@ -24,15 +22,40 @@ function ReceptionistDashboard() {
   const [appointmentForm, setAppointmentForm] = useState({
     patientId: '', doctorId: '', appointmentDate: '', reason: ''
   });
-  const [staffAbsenceForm, setStaffAbsenceForm] = useState({
-    staffId: '', absenceType: 'leave', startDate: '', endDate: '', reason: ''
-  });
+  const buildFullName = (first, last, fallback = 'Unknown') => {
+    const name = [first, last].filter(Boolean).join(' ').trim();
+    return name || fallback;
+  };
 
   useEffect(() => {
     console.log('🔄 ReceptionistDashboard mounted');
     loadAllData();
     // Don't refresh automatically - only load once
   }, []);
+
+  const flashMessage = (type, text, duration = 5000) => {
+    setMessage({ type, text });
+    if (duration) {
+      setTimeout(() => setMessage({ type: '', text: '' }), duration);
+    }
+  };
+
+  const fetchPatientsData = async () => {
+    try {
+      const response = await api.get('/receptionist/patients', { timeout: 8000 });
+      return response.data?.patients || [];
+    } catch (primaryError) {
+      console.warn('Primary patient fetch failed, falling back to /patients-all', primaryError);
+      try {
+        const fallbackResponse = await api.get('/receptionist/patients-all', { timeout: 8000 });
+        flashMessage('warning', 'Showing basic patient list while primary service recovers.');
+        return fallbackResponse.data?.patients || [];
+      } catch (fallbackError) {
+        console.error('Fallback patient fetch also failed', fallbackError);
+        throw fallbackError;
+      }
+    }
+  };
 
   const loadAllData = async () => {
     if (isLoadingRef.current) {
@@ -46,23 +69,67 @@ function ReceptionistDashboard() {
     try {
       const token = localStorage.getItem('token');
       if (!token) {
+        setLoading(false);
         navigate('/login');
         return;
       }
 
-      const headers = { Authorization: `Bearer ${token}` };
+      const safeFetch = async (label, fetcher, fallback = []) => {
+        try {
+          const data = await fetcher();
+          console.log(`✅ ${label} fetched:`, Array.isArray(data) ? data.length : data);
+          return data;
+        } catch (err) {
+          console.error(`❌ Error fetching ${label}:`, err.response?.data || err.message);
+          flashMessage('error', `❌ Unable to load ${label}. Please try again.`);
+          return fallback;
+        }
+      };
 
-      // Fetch only patients and doctors for the form
-      console.log('Fetching patients...');
-      const patientsRes = await axios.get('http://localhost:5000/api/receptionist/patients', { headers, timeout: 5000 });
-      console.log('✅ Patients:', patientsRes.data.patients?.length);
-      setPatients(patientsRes.data.patients || []);
+      const patientPromise = (async () => {
+        try {
+          return await fetchPatientsData();
+        } catch (err) {
+          flashMessage('error', '❌ Unable to load patients. Please try again.');
+          return patients;
+        }
+      })();
 
-      console.log('Fetching doctors...');
-      const doctorsRes = await axios.get('http://localhost:5000/api/receptionist/doctors/available', { headers, timeout: 5000 });
-      console.log('✅ Doctors:', doctorsRes.data.doctors?.length);
-      setDoctors(doctorsRes.data.doctors || []);
+      const [patientsData, doctorsData, appointmentsData, staffData] = await Promise.all([
+        patientPromise,
+        safeFetch('doctors', async () => {
+          const response = await api.get('/receptionist/doctors/available', { timeout: 8000 });
+          return response.data?.doctors || [];
+        }, doctors),
+        safeFetch('appointments', async () => {
+          const response = await api.get('/receptionist/appointments', { timeout: 8000 });
+          return response.data?.appointments || [];
+        }, appointments),
+        safeFetch('staff', async () => {
+          const response = await api.get('/receptionist/staff', { timeout: 8000 });
+          return response.data?.staff || [];
+        }, staff),
+      ]);
 
+      const normalizedAppointments = (appointmentsData || []).map((appointment) => ({
+        ...appointment,
+        patientFullName:
+          appointment.patientFullName ||
+          buildFullName(appointment.patient_name, appointment.patient_last_name, 'Unknown patient'),
+        doctorFullName:
+          appointment.doctorFullName ||
+          buildFullName(appointment.doctor_name, appointment.doctor_last_name, 'Unknown doctor')
+      }));
+
+      const normalizedStaff = (staffData || []).map((member) => ({
+        ...member,
+        fullName: member.fullName || buildFullName(member.first_name, member.last_name, 'Unnamed staff')
+      }));
+
+      setPatients(patientsData || []);
+      setDoctors(doctorsData || []);
+      setAppointments(normalizedAppointments);
+      setStaff(normalizedStaff);
       setLoading(false);
     } catch (error) {
       console.error('❌ Error loading data:', error.message);
@@ -76,25 +143,39 @@ function ReceptionistDashboard() {
     e.preventDefault();
     try {
       const token = localStorage.getItem('token');
-      const headers = { Authorization: `Bearer ${token}` };
+      if (!token) {
+        navigate('/login');
+        return;
+      }
 
-      const response = await axios.post(
-        'http://localhost:5000/api/receptionist/patients/register',
-        formData,
-        { headers }
+      const response = await api.post('/receptionist/patients/register', formData);
+
+      setPatients((prev) => [
+        {
+          id: response.data.patientId,
+          first_name: formData.firstName,
+          last_name: formData.lastName,
+          email: formData.email,
+          phone: formData.phone,
+          gender: formData.gender,
+          blood_group: formData.bloodGroup,
+          age: formData.age
+        },
+        ...prev
+      ]);
+
+      flashMessage(
+        'success',
+        `✅ Patient registered!\nUsername: ${response.data.tempUsername}\nPassword: ${response.data.tempPassword}`
       );
-
-      setMessage({ type: 'success', text: `✅ Patient registered!\nUsername: ${response.data.tempUsername}\nPassword: ${response.data.tempPassword}` });
       setFormData({
         firstName: '', lastName: '', age: '', gender: '', bloodGroup: '',
         address: '', city: '', postalCode: '', medicalHistory: '', allergies: '',
         emergencyContact: '', email: '', phone: ''
       });
-      setTimeout(() => setMessage({ type: '', text: '' }), 5000);
       loadAllData();
     } catch (error) {
-      setMessage({ type: 'error', text: '❌ Error: ' + (error.response?.data?.error || error.message) });
-      setTimeout(() => setMessage({ type: '', text: '' }), 5000);
+      flashMessage('error', '❌ Error: ' + (error.response?.data?.error || error.message));
     }
   };
 
@@ -102,43 +183,30 @@ function ReceptionistDashboard() {
     e.preventDefault();
     try {
       const token = localStorage.getItem('token');
-      const headers = { Authorization: `Bearer ${token}` };
+      if (!token) {
+        navigate('/login');
+        return;
+      }
 
-      await axios.post(
-        'http://localhost:5000/api/receptionist/appointments/book',
-        appointmentForm,
-        { headers }
-      );
+      // Convert datetime-local format (YYYY-MM-DDTHH:MM) to MySQL format (YYYY-MM-DD HH:MM:SS)
+      const appointmentDateTime = appointmentForm.appointmentDate.replace('T', ' ') + ':00';
 
-      setMessage({ type: 'success', text: '✅ Appointment booked successfully!' });
+      const payload = {
+        patientId: parseInt(appointmentForm.patientId),
+        doctorId: parseInt(appointmentForm.doctorId),
+        appointmentDate: appointmentDateTime,
+        reason: appointmentForm.reason
+      };
+
+      console.log('📅 Sending appointment booking request:', payload);
+
+      await api.post('/receptionist/appointments/book', payload);
+
+      flashMessage('success', '✅ Appointment booked successfully!');
       setAppointmentForm({ patientId: '', doctorId: '', appointmentDate: '', reason: '' });
-      setTimeout(() => setMessage({ type: '', text: '' }), 5000);
       loadAllData();
     } catch (error) {
-      setMessage({ type: 'error', text: '❌ Error: ' + (error.response?.data?.error || error.message) });
-      setTimeout(() => setMessage({ type: '', text: '' }), 5000);
-    }
-  };
-
-  const handleMarkStaffAbsence = async (e) => {
-    e.preventDefault();
-    try {
-      const token = localStorage.getItem('token');
-      const headers = { Authorization: `Bearer ${token}` };
-
-      await axios.post(
-        'http://localhost:5000/api/receptionist/staff-absence/mark',
-        staffAbsenceForm,
-        { headers }
-      );
-
-      setMessage({ type: 'success', text: '✅ Staff absence marked successfully!' });
-      setStaffAbsenceForm({ staffId: '', absenceType: 'leave', startDate: '', endDate: '', reason: '' });
-      setTimeout(() => setMessage({ type: '', text: '' }), 5000);
-      loadAllData();
-    } catch (error) {
-      setMessage({ type: 'error', text: '❌ Error: ' + (error.response?.data?.error || error.message) });
-      setTimeout(() => setMessage({ type: '', text: '' }), 5000);
+      flashMessage('error', '❌ Error: ' + (error.response?.data?.error || error.message));
     }
   };
 
@@ -176,17 +244,11 @@ function ReceptionistDashboard() {
         <button className={`tab-button ${activeTab === 'book' ? 'active' : ''}`} onClick={() => setActiveTab('book')}>
           📅 Book Appointment
         </button>
-        <button className={`tab-button ${activeTab === 'absence' ? 'active' : ''}`} onClick={() => setActiveTab('absence')}>
-          ⚠️ Mark Absence
-        </button>
         <button className={`tab-button ${activeTab === 'patients' ? 'active' : ''}`} onClick={() => setActiveTab('patients')}>
           👥 Patients ({patients.length})
         </button>
         <button className={`tab-button ${activeTab === 'appointments' ? 'active' : ''}`} onClick={() => setActiveTab('appointments')}>
           📋 Appointments ({appointments.length})
-        </button>
-        <button className={`tab-button ${activeTab === 'staff-absences' ? 'active' : ''}`} onClick={() => setActiveTab('staff-absences')}>
-          📅 Staff Absences ({staffAbsences.length})
         </button>
       </div>
 
@@ -212,12 +274,6 @@ function ReceptionistDashboard() {
             <div className="card-number">{staff.length}</div>
             <div className="card-label">Total Staff</div>
           </div>
-          <div className="dashboard-card card-absences">
-            <div className="card-icon">⚠️</div>
-            <div className="card-number">{staffAbsences.length}</div>
-            <div className="card-label">Active Absences</div>
-          </div>
-
           <div className="quick-actions">
             <h3>Quick Actions</h3>
             <button onClick={() => setActiveTab('register')} className="action-button action-register">
@@ -225,9 +281,6 @@ function ReceptionistDashboard() {
             </button>
             <button onClick={() => setActiveTab('book')} className="action-button action-book">
               ➕ Book Appointment
-            </button>
-            <button onClick={() => setActiveTab('absence')} className="action-button action-absence">
-              ⚠️ Mark Staff Absence
             </button>
           </div>
         </div>
@@ -287,10 +340,10 @@ function ReceptionistDashboard() {
                   required 
                   className="form-input"
                 >
-                  <option>Select Gender</option>
-                  <option>Male</option>
-                  <option>Female</option>
-                  <option>Other</option>
+                  <option value="" disabled>Select Gender</option>
+                  <option value="Male">Male</option>
+                  <option value="Female">Female</option>
+                  <option value="Other">Other</option>
                 </select>
               </div>
             </div>
@@ -422,72 +475,6 @@ function ReceptionistDashboard() {
         </div>
       )}
 
-      {activeTab === 'absence' && (
-        <div className="receptionist-form-container">
-          <form onSubmit={handleMarkStaffAbsence} className="receptionist-form">
-            <h2>⚠️ Mark Staff Absence</h2>
-            <p className="form-description">Record staff absence (leave, sick day, etc.)</p>
-            
-            <div className="form-row">
-              <select 
-                value={staffAbsenceForm.staffId} 
-                onChange={(e) => setStaffAbsenceForm({ ...staffAbsenceForm, staffId: e.target.value })} 
-                required 
-                className="form-input"
-              >
-                <option value="">Select Staff Member</option>
-                {staff.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.first_name} {s.last_name} - {s.department || 'General'}
-                  </option>
-                ))}
-              </select>
-              <select 
-                value={staffAbsenceForm.absenceType} 
-                onChange={(e) => setStaffAbsenceForm({ ...staffAbsenceForm, absenceType: e.target.value })} 
-                className="form-input"
-              >
-                <option value="leave">Leave</option>
-                <option value="sick">Sick Leave</option>
-                <option value="emergency">Emergency</option>
-                <option value="training">Training</option>
-                <option value="other">Other</option>
-              </select>
-            </div>
-            
-            <div className="form-row">
-              <input 
-                type="date" 
-                placeholder="Start Date" 
-                value={staffAbsenceForm.startDate} 
-                onChange={(e) => setStaffAbsenceForm({ ...staffAbsenceForm, startDate: e.target.value })} 
-                required 
-                className="form-input"
-              />
-              <input 
-                type="date" 
-                placeholder="End Date" 
-                value={staffAbsenceForm.endDate} 
-                onChange={(e) => setStaffAbsenceForm({ ...staffAbsenceForm, endDate: e.target.value })} 
-                required 
-                className="form-input"
-              />
-            </div>
-            
-            <textarea 
-              placeholder="Reason for absence" 
-              value={staffAbsenceForm.reason} 
-              onChange={(e) => setStaffAbsenceForm({ ...staffAbsenceForm, reason: e.target.value })} 
-              className="form-textarea"
-            />
-            
-            <button type="submit" className="form-submit-button">
-              ✅ Mark Absence
-            </button>
-          </form>
-        </div>
-      )}
-
       {activeTab === 'patients' && (
         <div className="receptionist-table-container">
           <h2>👥 Registered Patients ({patients.length})</h2>
@@ -545,8 +532,8 @@ function ReceptionistDashboard() {
                 <tbody>
                   {appointments.map((a) => (
                     <tr key={a.id} className={`status-${a.status?.toLowerCase()}`}>
-                      <td><strong>{a.patient_name}</strong></td>
-                      <td>{a.doctor_name}</td>
+                      <td><strong>{a.patientFullName || a.patient_name || 'Unknown patient'}</strong></td>
+                      <td>{a.doctorFullName || a.doctor_name || 'Unknown doctor'}</td>
                       <td>{a.specialization}</td>
                       <td>{new Date(a.appointment_date).toLocaleString()}</td>
                       <td>{a.reason}</td>
@@ -564,45 +551,6 @@ function ReceptionistDashboard() {
         </div>
       )}
 
-      {activeTab === 'staff-absences' && (
-        <div className="receptionist-table-container">
-          <h2>📅 Staff Absences ({staffAbsences.length})</h2>
-          {staffAbsences.length === 0 ? (
-            <p className="empty-state">No staff absences recorded</p>
-          ) : (
-            <div className="table-wrapper">
-              <table className="receptionist-table">
-                <thead>
-                  <tr>
-                    <th>Staff Member</th>
-                    <th>Department</th>
-                    <th>Type</th>
-                    <th>Start Date</th>
-                    <th>End Date</th>
-                    <th>Reason</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {staffAbsences.map((a) => (
-                    <tr key={a.id} className={`absence-type-${a.absence_type?.toLowerCase()}`}>
-                      <td><strong>{a.staff_name}</strong></td>
-                      <td>{a.department || '-'}</td>
-                      <td>
-                        <span className={`absence-badge absence-${a.absence_type?.toLowerCase()}`}>
-                          {a.absence_type}
-                        </span>
-                      </td>
-                      <td>{new Date(a.start_date).toLocaleDateString()}</td>
-                      <td>{new Date(a.end_date).toLocaleDateString()}</td>
-                      <td>{a.reason || '-'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }

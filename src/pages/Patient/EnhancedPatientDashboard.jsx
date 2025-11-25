@@ -3,6 +3,11 @@ import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import './PatientDashboard.css';
 
+const buildFullName = (first, last, fallback = 'Unknown Doctor') => {
+    const name = [first, last].filter(Boolean).join(' ').trim();
+    return name || fallback;
+};
+
 function EnhancedPatientDashboard() {
     const [user, setUser] = useState(null);
     const [activeTab, setActiveTab] = useState('overview');
@@ -12,6 +17,8 @@ function EnhancedPatientDashboard() {
     const [selectedFile, setSelectedFile] = useState(null);
     const [documentType, setDocumentType] = useState('prescription');
     const [documentDescription, setDocumentDescription] = useState('');
+    const [prescriptionAnalysis, setPrescriptionAnalysis] = useState(null); // Store current analysis result
+    const [analyzing, setAnalyzing] = useState(false); // Track analysis loading state
     
     const [myData, setMyData] = useState({
         appointments: [],
@@ -72,8 +79,19 @@ function EnhancedPatientDashboard() {
                 timeout: 10000 
             }).catch(() => ({ data: { success: true, documents: [] } }));
 
+            const normalizedAppointments = (appointmentsRes.data.appointments || []).map((appointment) => ({
+                ...appointment,
+                doctorFullName:
+                    appointment.doctorFullName ||
+                    buildFullName(
+                        appointment.doctor_first_name ?? appointment.first_name,
+                        appointment.doctor_last_name ?? appointment.last_name,
+                        'Unknown Doctor'
+                    )
+            }));
+
             setMyData({
-                appointments: appointmentsRes.data.appointments || [],
+                appointments: normalizedAppointments,
                 labResults: labRes.data.labResults || [],
                 prescriptions: prescriptionsRes.data.prescriptions || [],
                 documents: documentsRes.data.documents || [],
@@ -99,47 +117,52 @@ function EnhancedPatientDashboard() {
         e.preventDefault();
         setUploadMessage('');
         setUploadError('');
+        setPrescriptionAnalysis(null);
 
         if (!selectedFile) {
             setUploadError('Please select a file');
             return;
         }
 
-        if (!documentType) {
-            setUploadError('Please select document type');
-            return;
-        }
-
         try {
+            setAnalyzing(true);
+            setUploadMessage('📤 Uploading and analyzing prescription...');
+            
             const formData = new FormData();
-            formData.append('documentType', documentType);
-            formData.append('filename', selectedFile.name);
-            formData.append('description', documentDescription);
-            formData.append('fileContent', selectedFile);
+            formData.append('file', selectedFile);
+            formData.append('notes', documentDescription);
 
             const token = localStorage.getItem('token');
-            const headers = { Authorization: `Bearer ${token}` };
+            const headers = { 
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'multipart/form-data'
+            };
 
             const response = await axios.post(
-                `${API_URL}/patient/documents/upload`,
+                `${API_URL}/prescription-analyze`,
                 formData,
-                { headers, timeout: 30000 }
+                { headers, timeout: 60000 }
             );
 
             if (response.data.success) {
-                setUploadMessage('✅ Document uploaded successfully!');
+                setUploadMessage('✅ Prescription analyzed successfully!');
+                setPrescriptionAnalysis(response.data.analysis || response.data.raw || response.data);
                 setSelectedFile(null);
                 setDocumentDescription('');
-                document.querySelector('input[type="file"]').value = '';
-                
-                // Reload documents
-                setTimeout(() => {
-                    const token = localStorage.getItem('token');
-                    loadPatientData(token);
-                }, 1500);
+                const fileInput = document.querySelector('input[type="file"]');
+                if (fileInput) fileInput.value = '';
+            } else {
+                setUploadError('Analysis completed but no results returned');
             }
         } catch (error) {
-            setUploadError(error.response?.data?.error || 'Failed to upload document');
+            console.error('Upload/Analysis error:', error);
+            const errorMsg = error.response?.data?.error || error.message || 'Failed to analyze prescription';
+            setUploadError(`❌ ${errorMsg}`);
+            if (error.response?.data?.details) {
+                console.error('Error details:', error.response.data.details);
+            }
+        } finally {
+            setAnalyzing(false);
         }
     };
 
@@ -173,6 +196,7 @@ function EnhancedPatientDashboard() {
         navigate('/login');
     };
 
+
     if (loading) {
         return <div className="patient-dashboard-container"><p>Loading...</p></div>;
     }
@@ -205,13 +229,7 @@ function EnhancedPatientDashboard() {
                         className={`tab-btn ${activeTab === 'prescriptions' ? 'active' : ''}`}
                         onClick={() => setActiveTab('prescriptions')}
                     >
-                        💊 Prescriptions ({myData.prescriptions.length})
-                    </button>
-                    <button
-                        className={`tab-btn ${activeTab === 'lab-results' ? 'active' : ''}`}
-                        onClick={() => setActiveTab('lab-results')}
-                    >
-                        🔬 Lab Results ({myData.labResults.length})
+                        💊 Prescription Analysis
                     </button>
                     <button
                         className={`tab-btn ${activeTab === 'medical-records' ? 'active' : ''}`}
@@ -301,8 +319,8 @@ function EnhancedPatientDashboard() {
                                 {myData.appointments.map(apt => (
                                     <div key={apt.id} className="appointment-card">
                                         <div className="appointment-header">
-                                            <h3>Dr. {apt.doctor_first_name} {apt.doctor_last_name}</h3>
-                                            <span className={`status-badge status-${apt.status}`}>
+                                            <h3>Dr. {apt.doctorFullName}</h3>
+                                            <span className={`status-badge status-${apt.status || 'scheduled'}`}>
                                                 {apt.status?.replace('_', ' ').toUpperCase()}
                                             </span>
                                         </div>
@@ -318,91 +336,231 @@ function EnhancedPatientDashboard() {
                     </div>
                 )}
 
-                {/* Prescriptions Tab */}
+                {/* Prescription Analysis Tab */}
                 {activeTab === 'prescriptions' && (
                     <div className="tab-content">
-                        <h2>💊 My Active Prescriptions</h2>
-                        {myData.prescriptions.length === 0 ? (
-                            <div className="empty-state">
-                                <p>No active prescriptions</p>
-                            </div>
-                        ) : (
-                            <div className="prescriptions-grid">
-                                {myData.prescriptions.map(rx => (
-                                    <div key={rx.id} className="prescription-card">
-                                        <div className="card-header">
-                                            <h3>{rx.medication_name}</h3>
-                                            <button 
-                                                className="download-btn"
-                                                onClick={() => downloadDocument(rx.id, `${rx.medication_name}.pdf`)}
-                                            >
-                                                ⬇️ Download
-                                            </button>
-                                        </div>
-                                        <div className="card-body">
-                                            <p><strong>💪 Strength:</strong> {rx.strength}</p>
-                                            <p><strong>📊 Dosage:</strong> {rx.dosage}</p>
-                                            <p><strong>⏰ Frequency:</strong> {rx.frequency}</p>
-                                            <p><strong>📅 Prescribed:</strong> {new Date(rx.prescribed_date).toLocaleDateString()}</p>
-                                            {rx.end_date && (
-                                                <p><strong>⏹️ Valid Until:</strong> {new Date(rx.end_date).toLocaleDateString()}</p>
-                                            )}
-                                            {rx.instructions && (
-                                                <p><strong>📝 Instructions:</strong> {rx.instructions}</p>
-                                            )}
-                                        </div>
+                        <h2 style={{ marginBottom: '30px', color: '#1976d2' }}>🤖 Prescription Analysis</h2>
+                        
+                        {/* Upload Prescription Section */}
+                        <div style={{
+                            marginBottom: '30px',
+                            padding: '25px',
+                            backgroundColor: '#f5f5f5',
+                            borderRadius: '12px',
+                            border: '2px dashed #2196F3',
+                            boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+                        }}>
+                            <h3 style={{ marginBottom: '20px', color: '#2196F3', fontSize: '20px' }}>📤 Upload Prescription Document</h3>
+                            
+                            {uploadMessage && (
+                                <div style={{
+                                    padding: '12px',
+                                    backgroundColor: '#e8f5e9',
+                                    color: '#2e7d32',
+                                    borderRadius: '6px',
+                                    marginBottom: '15px',
+                                    fontWeight: '500'
+                                }}>
+                                    {uploadMessage}
+                                </div>
+                            )}
+                            
+                            {uploadError && (
+                                <div style={{
+                                    padding: '12px',
+                                    backgroundColor: '#ffebee',
+                                    color: '#c62828',
+                                    borderRadius: '6px',
+                                    marginBottom: '15px',
+                                    fontWeight: '500'
+                                }}>
+                                    {uploadError}
+                                </div>
+                            )}
+                            
+                            <form onSubmit={handleUploadPrescription} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                                <div style={{ display: 'flex', gap: '15px', flexWrap: 'wrap', alignItems: 'flex-end' }}>
+                                    <div style={{ flex: '1', minWidth: '250px' }}>
+                                        <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', fontSize: '14px' }}>
+                                            Select Prescription File (PDF, Image, or Document)
+                                        </label>
+                                        <input
+                                            type="file"
+                                            accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
+                                            onChange={(e) => {
+                                                setSelectedFile(e.target.files[0]);
+                                                setUploadError('');
+                                                setUploadMessage('');
+                                                setPrescriptionAnalysis(null);
+                                            }}
+                                            disabled={analyzing}
+                                            style={{
+                                                width: '100%',
+                                                padding: '10px',
+                                                border: '1px solid #ddd',
+                                                borderRadius: '6px',
+                                                fontSize: '14px'
+                                            }}
+                                            required
+                                        />
                                     </div>
-                                ))}
+                                    <div style={{ flex: '1', minWidth: '250px' }}>
+                                        <label style={{ display: 'block', marginBottom: '8px', fontWeight: 'bold', fontSize: '14px' }}>
+                                            Notes (Optional)
+                                        </label>
+                                        <input
+                                            type="text"
+                                            value={documentDescription}
+                                            onChange={(e) => setDocumentDescription(e.target.value)}
+                                            placeholder="e.g., Prescription from Dr. Smith"
+                                            disabled={analyzing}
+                                            style={{
+                                                width: '100%',
+                                                padding: '10px',
+                                                border: '1px solid #ddd',
+                                                borderRadius: '6px',
+                                                fontSize: '14px'
+                                            }}
+                                        />
+                                    </div>
+                                    <button
+                                        type="submit"
+                                        disabled={!selectedFile || analyzing}
+                                        style={{
+                                            backgroundColor: (selectedFile && !analyzing) ? '#2196F3' : '#ccc',
+                                            color: 'white',
+                                            padding: '12px 24px',
+                                            fontSize: '16px',
+                                            fontWeight: 'bold',
+                                            borderRadius: '6px',
+                                            border: 'none',
+                                            cursor: (selectedFile && !analyzing) ? 'pointer' : 'not-allowed',
+                                            whiteSpace: 'nowrap',
+                                            height: 'fit-content',
+                                            transition: 'background 0.2s'
+                                        }}
+                                    >
+                                        {analyzing ? '🤖 Analyzing...' : '📤 Upload & Analyze'}
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+
+                        {/* AI Analysis Results */}
+                        {prescriptionAnalysis && (
+                            <div style={{
+                                marginTop: '30px',
+                                padding: '25px',
+                                backgroundColor: '#e3f2fd',
+                                borderRadius: '12px',
+                                border: '2px solid #2196F3',
+                                boxShadow: '0 4px 12px rgba(0,0,0,0.1)'
+                            }}>
+                                <h3 style={{ color: '#1976d2', marginBottom: '20px', fontSize: '22px' }}>
+                                    🤖 AI Analysis Results
+                                </h3>
+                                
+                                {typeof prescriptionAnalysis === 'object' ? (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
+                                        {prescriptionAnalysis.howToTake && (
+                                            <div style={{ padding: '15px', backgroundColor: 'white', borderRadius: '8px' }}>
+                                                <strong style={{ color: '#1976d2', fontSize: '16px' }}>✅ How to Take:</strong>
+                                                <p style={{ margin: '8px 0 0 0', color: '#555', fontSize: '15px', lineHeight: '1.6' }}>
+                                                    {prescriptionAnalysis.howToTake}
+                                                </p>
+                                            </div>
+                                        )}
+                                        
+                                        {prescriptionAnalysis.importantNotes && prescriptionAnalysis.importantNotes.length > 0 && (
+                                            <div style={{ padding: '15px', backgroundColor: 'white', borderRadius: '8px' }}>
+                                                <strong style={{ color: '#388e3c', fontSize: '16px' }}>📌 Important Notes:</strong>
+                                                <ul style={{ margin: '8px 0 0 0', paddingLeft: '25px', color: '#555', fontSize: '15px', lineHeight: '1.8' }}>
+                                                    {prescriptionAnalysis.importantNotes.map((note, i) => (
+                                                        <li key={i} style={{ marginBottom: '5px' }}>{note}</li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        )}
+                                        
+                                        {prescriptionAnalysis.sideEffects && prescriptionAnalysis.sideEffects.length > 0 && (
+                                            <div style={{ padding: '15px', backgroundColor: 'white', borderRadius: '8px' }}>
+                                                <strong style={{ color: '#f57c00', fontSize: '16px' }}>⚠️ Side Effects:</strong>
+                                                <ul style={{ margin: '8px 0 0 0', paddingLeft: '25px', color: '#555', fontSize: '15px', lineHeight: '1.8' }}>
+                                                    {prescriptionAnalysis.sideEffects.map((effect, i) => (
+                                                        <li key={i} style={{ marginBottom: '5px' }}>{effect}</li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        )}
+                                        
+                                        {prescriptionAnalysis.precautions && prescriptionAnalysis.precautions.length > 0 && (
+                                            <div style={{ padding: '15px', backgroundColor: 'white', borderRadius: '8px' }}>
+                                                <strong style={{ color: '#d32f2f', fontSize: '16px' }}>🚫 Precautions:</strong>
+                                                <ul style={{ margin: '8px 0 0 0', paddingLeft: '25px', color: '#555', fontSize: '15px', lineHeight: '1.8' }}>
+                                                    {prescriptionAnalysis.precautions.map((precaution, i) => (
+                                                        <li key={i} style={{ marginBottom: '5px' }}>{precaution}</li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        )}
+                                        
+                                        {prescriptionAnalysis.foodInteractions && prescriptionAnalysis.foodInteractions.length > 0 && (
+                                            <div style={{ padding: '15px', backgroundColor: 'white', borderRadius: '8px' }}>
+                                                <strong style={{ color: '#7b1fa2', fontSize: '16px' }}>🍽️ Food Interactions:</strong>
+                                                <ul style={{ margin: '8px 0 0 0', paddingLeft: '25px', color: '#555', fontSize: '15px', lineHeight: '1.8' }}>
+                                                    {prescriptionAnalysis.foodInteractions.map((interaction, i) => (
+                                                        <li key={i} style={{ marginBottom: '5px' }}>{interaction}</li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        )}
+                                        
+                                        {prescriptionAnalysis.whenToContactDoctor && prescriptionAnalysis.whenToContactDoctor.length > 0 && (
+                                            <div style={{ padding: '15px', backgroundColor: '#fff3e0', borderRadius: '8px', border: '1px solid #ff9800' }}>
+                                                <strong style={{ color: '#e65100', fontSize: '16px' }}>🏥 When to Contact Doctor:</strong>
+                                                <ul style={{ margin: '8px 0 0 0', paddingLeft: '25px', color: '#555', fontSize: '15px', lineHeight: '1.8' }}>
+                                                    {prescriptionAnalysis.whenToContactDoctor.map((situation, i) => (
+                                                        <li key={i} style={{ marginBottom: '5px' }}>{situation}</li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        )}
+                                        
+                                        {prescriptionAnalysis.warnings && prescriptionAnalysis.warnings.length > 0 && (
+                                            <div style={{ padding: '15px', backgroundColor: '#ffebee', borderRadius: '8px', border: '1px solid #f44336' }}>
+                                                <strong style={{ color: '#c62828', fontSize: '16px' }}>⚠️ Warnings:</strong>
+                                                <ul style={{ margin: '8px 0 0 0', paddingLeft: '25px', color: '#555', fontSize: '15px', lineHeight: '1.8' }}>
+                                                    {prescriptionAnalysis.warnings.map((warning, i) => (
+                                                        <li key={i} style={{ marginBottom: '5px' }}>{warning}</li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        )}
+                                    </div>
+                                ) : (
+                                    <div style={{ padding: '15px', backgroundColor: 'white', borderRadius: '8px' }}>
+                                        <pre style={{ whiteSpace: 'pre-wrap', fontSize: '14px', color: '#555', margin: 0 }}>
+                                            {typeof prescriptionAnalysis === 'string' ? prescriptionAnalysis : JSON.stringify(prescriptionAnalysis, null, 2)}
+                                        </pre>
+                                    </div>
+                                )}
+                                
+                                <div style={{
+                                    marginTop: '20px',
+                                    padding: '12px',
+                                    backgroundColor: '#e3f2fd',
+                                    border: '1px solid #2196F3',
+                                    borderRadius: '6px',
+                                    fontSize: '12px',
+                                    color: '#1565c0'
+                                }}>
+                                    <strong>ℹ️ Disclaimer:</strong> These are AI-generated suggestions for informational purposes only. Always follow your doctor's instructions and consult your healthcare provider for medical advice.
+                                </div>
                             </div>
                         )}
                     </div>
                 )}
 
-                {/* Lab Results Tab */}
-                {activeTab === 'lab-results' && (
-                    <div className="tab-content">
-                        <h2>🔬 Lab Test Results</h2>
-                        {myData.labResults.length === 0 ? (
-                            <div className="empty-state">
-                                <p>No lab results available</p>
-                            </div>
-                        ) : (
-                            <div className="lab-results-grid">
-                                {myData.labResults.map(result => (
-                                    <div key={result.id} className="lab-result-card">
-                                        <div className="result-header">
-                                            <h3>{result.test_name}</h3>
-                                            <span className={`result-status ${result.status}`}>
-                                                {result.status?.toUpperCase()}
-                                            </span>
-                                        </div>
-                                        <div className="result-body">
-                                            <p><strong>📅 Test Date:</strong> {new Date(result.test_date).toLocaleDateString()}</p>
-                                            <p><strong>🔍 Type:</strong> {result.test_type}</p>
-                                            {result.result_value && (
-                                                <p><strong>📊 Result:</strong> {result.result_value}</p>
-                                            )}
-                                            {result.normal_range && (
-                                                <p><strong>📍 Normal Range:</strong> {result.normal_range}</p>
-                                            )}
-                                            {result.remarks && (
-                                                <p><strong>📝 Remarks:</strong> {result.remarks}</p>
-                                            )}
-                                        </div>
-                                        {result.report_url && (
-                                            <button 
-                                                className="download-btn-small"
-                                                onClick={() => downloadDocument(result.id, `${result.test_name}_Report.pdf`)}
-                                            >
-                                                ⬇️ Download Report
-                                            </button>
-                                        )}
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                )}
 
                 {/* Medical Records Tab */}
                 {activeTab === 'medical-records' && (
@@ -461,6 +619,87 @@ function EnhancedPatientDashboard() {
                             ) : (
                                 <p className="no-data">No vital signs recorded</p>
                             )}
+                        </div>
+
+                        {/* Medical Certificates Section */}
+                        <div className="records-section">
+                            <h3>📜 Medical Certificates</h3>
+                            {(() => {
+                                const medicalCerts = (myData.documents || []).filter(d => 
+                                    d.document_type === 'medical_certificate' || d.documentType === 'medical_certificate'
+                                );
+                                
+                                if (medicalCerts.length === 0) {
+                                    return <p className="no-data">No medical certificates uploaded</p>;
+                                }
+                                
+                                return (
+                                    <div className="documents-grid">
+                                        {medicalCerts.map((doc, index) => (
+                                            <div key={doc.id || `cert-${index}`} className="document-card">
+                                                <div className="card-header">
+                                                    <h4>{doc.filename || 'Medical Certificate'}</h4>
+                                                    <button
+                                                        className="download-btn"
+                                                        onClick={() => downloadDocument(doc.id, doc.filename)}
+                                                    >
+                                                        ⬇️ Download
+                                                    </button>
+                                                </div>
+                                                <div className="card-body">
+                                                    {doc.description && <p><strong>Description:</strong> {doc.description}</p>}
+                                                    {doc.upload_date && (
+                                                        <p><strong>Uploaded:</strong> {new Date(doc.upload_date).toLocaleDateString()}</p>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                );
+                            })()}
+                        </div>
+
+                        {/* Other Documents Section */}
+                        <div className="records-section">
+                            <h3>📄 Other Documents</h3>
+                            {(() => {
+                                const otherDocs = (myData.documents || []).filter(d => {
+                                    const docType = d.document_type || d.documentType;
+                                    return docType && 
+                                           docType !== 'prescription' && 
+                                           docType !== 'lab_report' && 
+                                           docType !== 'medical_certificate';
+                                });
+                                
+                                if (otherDocs.length === 0) {
+                                    return <p className="no-data">No other documents uploaded</p>;
+                                }
+                                
+                                return (
+                                    <div className="documents-grid">
+                                        {otherDocs.map((doc, index) => (
+                                            <div key={doc.id || `doc-${index}`} className="document-card">
+                                                <div className="card-header">
+                                                    <h4>{doc.filename || 'Document'}</h4>
+                                                    <button
+                                                        className="download-btn"
+                                                        onClick={() => downloadDocument(doc.id, doc.filename)}
+                                                    >
+                                                        ⬇️ Download
+                                                    </button>
+                                                </div>
+                                                <div className="card-body">
+                                                    <p><strong>Type:</strong> {(doc.document_type || doc.documentType || 'Unknown').replace('_', ' ')}</p>
+                                                    {doc.description && <p><strong>Description:</strong> {doc.description}</p>}
+                                                    {doc.upload_date && (
+                                                        <p><strong>Uploaded:</strong> {new Date(doc.upload_date).toLocaleDateString()}</p>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                );
+                            })()}
                         </div>
                     </div>
                 )}
