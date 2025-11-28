@@ -395,7 +395,7 @@ function ComprehensiveDashboard() {
                     <div className="tab-content">
                         <button className="back-btn" onClick={() => setActiveTab('patients')}>← Back to Patients</button>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
-                            <h2>Patient: <strong>{selectedPatient.patient.first_name} {selectedPatient.patient.last_name}</strong></h2>
+                        <h2>Patient: <strong>{selectedPatient.patient.first_name} {selectedPatient.patient.last_name}</strong></h2>
                             <button 
                                 className="action-btn" 
                                 onClick={handleGetAISuggestions}

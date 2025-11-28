@@ -13,7 +13,7 @@ class ZKPAuthService {
      */
     static async register(username, email, password, role, firstName, lastName) {
         try {
-            const response = await api.post('/auth/register', {
+            const response = await api.post('/auth/zkp/register', {
                 username,
                 email,
                 password,
@@ -38,9 +38,10 @@ class ZKPAuthService {
     /**
      * LOGIN STEP 1: Initiate proof
      */
-    static async loginInitiate(username) {
+    static async loginInitiate(username, tValue) {
         try {
-            const response = await api.post('/auth/login/initiate', { username });
+            // tValue (commitment) must be supplied by the caller: t = g^r mod p
+            const response = await api.post('/auth/zkp/login/initiate', { username, tValue });
 
             if (!response.data.success) {
                 return {
@@ -49,14 +50,15 @@ class ZKPAuthService {
                 };
             }
 
-            // Store session info
-            sessionStorage.setItem('zkp_session_id', response.data.session_id);
+            // Store session info (server returns `sessionId`)
+            sessionStorage.setItem('zkp_session_id', response.data.sessionId);
             sessionStorage.setItem('zkp_challenge', response.data.challenge);
 
             return {
                 success: true,
-                session_id: response.data.session_id,
-                challenge: response.data.challenge
+                session_id: response.data.sessionId,
+                challenge: response.data.challenge,
+                params: response.data.params
             };
 
         } catch (error) {
@@ -141,10 +143,9 @@ class ZKPAuthService {
             console.log('  proof_s length:', proof_s?.length, 'value:', proof_s?.substring?.(0, 50));
             console.log('  t_value:', t_value?.substring?.(0, 50));
 
-            const response = await api.post('/auth/login/verify', {
-                session_id,
-                proof_s,
-                t_value
+            const response = await api.post('/auth/zkp/login/verify', {
+                sessionId: session_id || sessionStorage.getItem('zkp_session_id'),
+                proof: proof_s,
             });
 
             if (!response.data.success) {
@@ -182,21 +183,32 @@ class ZKPAuthService {
      */
     static async login(username, password) {
         try {
-            // Step 1: Initiate (get session_id and challenge from server)
-            const initiateResult = await this.loginInitiate(username);
+            // Step 0: Ask server for params (base, prime) so we compute t using same values
+            const paramsResp = await this.loginInitiate(username /* no tValue */);
+            if (!paramsResp.success) {
+                return paramsResp;
+            }
+
+            const serverBase = paramsResp.params?.base ? BigInt(paramsResp.params.base) : this.ZKP_PARAMS.g;
+            const serverPrime = paramsResp.params?.prime ? BigInt(paramsResp.params.prime) : this.ZKP_PARAMS.p;
+
+            // Step 1: compute commitment t using a fresh random r (client-side)
+            const random_r = await this.generateRandomBigInt();
+            const t_value = this.modularExponentiation(serverBase, random_r, serverPrime).toString();
+
+            // Step 2: Send t to server to get session + challenge
+            const initiateResult = await this.loginInitiate(username, t_value);
             if (!initiateResult.success) {
                 return initiateResult;
             }
 
-            // Step 2: Generate proof (compute t and s)
-            const proofResult = await this.generateProof(password, initiateResult.challenge);
-            if (!proofResult.success) {
-                return proofResult;
-            }
+            // Step 3: derive secret x from password and compute s = r + c*x
+            const secret_x = await this.getSecretFromPassword(password);
+            const c = BigInt(initiateResult.challenge);
+            const s = random_r + (c * secret_x);
 
-            // Step 3: Verify proof (send t and s to server for verification)
-            const verifyResult = await this.loginVerify(proofResult.proof_s, proofResult.t_value);
-
+            // Step 4: Verify proof (send s to server for verification)
+            const verifyResult = await this.loginVerify(s.toString(), t_value);
             return verifyResult;
 
         } catch (error) {

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import SimpleHashAuthService from '../services/simpleHashAuthService';
+import ZKPAuthService from '../services/zkpAuthService';
 import './Auth.css';
 
 function LoginPage() {
@@ -70,6 +71,46 @@ function LoginPage() {
         }
     };
 
+    const handleZKPLogin = async (e) => {
+        e.preventDefault();
+        setLoading(true);
+        setError('');
+
+        try {
+            if (!username || !password) {
+                setError('Please enter username and password for ZKP login');
+                setLoading(false);
+                return;
+            }
+
+            const result = await ZKPAuthService.login(username, password);
+
+            if (result.success) {
+                const user = result.user;
+                let redirectPath = '/';
+                switch (user.role) {
+                    case 'receptionist': redirectPath = '/receptionist'; break;
+                    case 'patient': redirectPath = '/patient'; break;
+                    case 'pharmacist': redirectPath = '/pharmacist'; break;
+                    case 'doctor': redirectPath = '/doctor'; break;
+                    case 'nurse': redirectPath = '/nurse'; break;
+                    case 'lab_technician': redirectPath = '/lab-technician'; break;
+                    case 'inventory_manager': redirectPath = '/inventory-manager'; break;
+                    case 'admin': redirectPath = '/admin'; break;
+                    default: redirectPath = '/';
+                }
+                navigate(redirectPath);
+            } else {
+                setError(result.error || 'ZKP login failed');
+            }
+
+        } catch (err) {
+            setError(err.message || 'ZKP Login failed');
+        } finally {
+            setLoading(false);
+        }
+    };
+
     return (
         <div className="auth-container">
             <div className="auth-box">
@@ -108,6 +149,13 @@ function LoginPage() {
                     <button type="submit" disabled={loading} className="submit-btn">
                         {loading ? 'Signing in...' : 'Sign In'}
                     </button>
+
+                    {/* ZKP login button temporarily hidden per request */}
+                    {/*
+                    <button type="button" disabled={loading} onClick={handleZKPLogin} className="secondary-btn">
+                        {loading ? 'Processing...' : 'Sign In with ZKP'}
+                    </button>
+                    */}
 
                     <div className="auth-link">
                         <p>

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import SimpleHashAuthService from '../services/simpleHashAuthService';
+import ZKPAuthService from '../services/zkpAuthService';
 import './Auth.css';
 
 function RegisterPage() {
@@ -126,6 +127,43 @@ function RegisterPage() {
         }
     };
 
+    const handleZKPRegister = async (e) => {
+        e.preventDefault();
+        setLoading(true);
+        setError('');
+        setSuccess('');
+
+        try {
+            // Basic validations reused from handleRegister
+            if (!formData.username?.trim()) throw new Error('Username is required');
+            if (!formData.email?.trim()) throw new Error('Email is required');
+            if (!formData.password) throw new Error('Password is required');
+            if (formData.password !== formData.confirmPassword) throw new Error('Passwords do not match');
+            if (formData.password.length < 6) throw new Error('Password must be at least 6 characters');
+
+            const result = await ZKPAuthService.register(
+                formData.username,
+                formData.email,
+                formData.password,
+                formData.role,
+                formData.firstName || 'User',
+                formData.lastName || ''
+            );
+
+            if (result.success) {
+                setSuccess('Registration successful! Redirecting to login...');
+                setTimeout(() => navigate('/login'), 1600);
+            } else {
+                setError(result.error || 'ZKP Registration failed');
+            }
+
+        } catch (err) {
+            setError(err.message || 'Registration failed');
+        } finally {
+            setLoading(false);
+        }
+    };
+
     return (
         <div className="auth-container">
             <div className="auth-box register-box">
@@ -240,6 +278,13 @@ function RegisterPage() {
                     <button type="submit" disabled={loading} className="submit-btn">
                         {loading ? 'Creating account...' : 'Create Account'}
                     </button>
+
+                    {/* ZKP register button temporarily hidden per request */}
+                    {/*
+                    <button type="button" disabled={loading} onClick={handleZKPRegister} className="secondary-btn">
+                        {loading ? 'Processing...' : 'Register with ZKP'}
+                    </button>
+                    */}
 
                     <div className="auth-link">
                         <p>
